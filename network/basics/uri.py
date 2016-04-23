@@ -121,7 +121,8 @@ options:
   status_code:
     description:
       - A valid, numeric, HTTP status code that signifies success of the
-        request. Can also be comma separated list of status codes.
+        request. Can also be comma separated list of status codes. Can also be empty
+        to get return data regardless of what the returned status code is.
     required: false
     default: 200
   timeout:
