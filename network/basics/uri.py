@@ -368,7 +368,7 @@ def main():
     return_content = module.params['return_content']
     creates = module.params['creates']
     removes = module.params['removes']
-    status_code = [int(x) for x in list(module.params['status_code'])]
+    status_code = [int(x) for x in list(module.params['status_code']) if x]
     socket_timeout = module.params['timeout']
 
     dict_headers = module.params['headers']
@@ -451,7 +451,7 @@ def main():
     else:
         u_content = unicode(content, content_encoding, errors='replace')
 
-    if resp['status'] not in status_code:
+    if resp['status'] not in status_code and status_code:
         uresp['msg'] = 'Status code was not %s: %s' % (status_code, uresp.get('msg', ''))
         module.fail_json(content=u_content, **uresp)
     elif return_content:
