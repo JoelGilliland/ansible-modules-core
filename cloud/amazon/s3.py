@@ -143,7 +143,7 @@ options:
     version_added: "1.3"
   validate:
     description:
-      - Ensure the bucket or object exists before trying to run an operation. One of [Both, Bucket, Object, None], new in 2.0
+      - Ensure the bucket or object exists before trying to run an operation. One of [Both, Bucket, Object, None]. validate=bucket/none is not allowed when using overwrite=different or version parameter.
     required: false
     default: both
     version_added: "2.1"
@@ -315,6 +315,11 @@ def download_s3file(module, s3, key, dest, retries, version=None):
             key.get_contents_to_filename(dest)
             module.exit_json(msg="GET operation complete", changed=True)
         except s3.provider.storage_copy_error as e:
+            if e.status == 404:
+                module.fail_json(msg="Download failed with 404, object must not exist; %s" % e)
+            else:
+                module.fail_json(msg= str(e))
+        except s3.provider.storage_copy_error as e:
             module.fail_json(msg= str(e))
         except SSLError as e:
             # actually fail on last pass through the loop.
@@ -483,7 +488,11 @@ def main():
 
         # There is a conflict with validate_key=false and overwrite=different since md5 check of remote file requires validation.
         if pathrtn and not validate_key and overwrite == 'different':
-            module.exit_json(msg="Local object already exists. Use validate_key=true to compare local and remote, or overwrite=always to force.", changed=False)
+            module.exit_json(msg="Local object already exists. Use validate=key/both to compare local and remote, or overwrite=always to force.", changed=False)
+
+        # There is a conflict with validate_key=false and using version together. Boto will return: "BotoClientError: When providing 'validate=False', no other params are allowed."
+        if version and not validate_key:
+            module.exit_json(msg="Validation of the object is required when using the version parameter. Either remove the version parameter or set validate=key/both", changed=False)
 
         # Then, we check to see if the bucket exists, we get "bucket" returned.
         bucketrtn = bucket_check(module, s3, bucket, validate=validate_bucket)
@@ -522,7 +531,7 @@ def main():
 
         # Validation of the key is required for certain cases.
         if not validate_key and overwrite in ('never', 'different'):
-            module.exit_json(msg="Validation of the key is necessary if overwrite=never/different is set. Set validate_key=true or overwrite=always to force.", changed=False)
+            module.exit_json(msg="Validation of the key is necessary if overwrite=never/different is set. Set validate=key/both or overwrite=always to force.", changed=False)
 
         # Lets check to see if bucket exists to get ground truth.
         bucketrtn = bucket_check(module, s3, bucket, validate=validate_bucket)
