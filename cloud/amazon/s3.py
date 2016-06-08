@@ -146,7 +146,7 @@ options:
       - Ensure the bucket or object exists before trying to run an operation. One of [Both, Bucket, Object, None]. validate=bucket/none is not allowed when using overwrite=different or version parameter.
     required: false
     default: both
-    version_added: "2.1"
+    version_added: "2.2"
 
 requirements: [ "boto" ]
 author:
