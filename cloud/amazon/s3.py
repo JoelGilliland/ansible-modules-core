@@ -46,6 +46,18 @@ options:
     required: false
     aliases: []
     version_added: "1.3"
+  dest_bucket:
+    description:
+      - The destination bucket when copying an object/key with a COPY operation.
+    required: false
+    aliases: []
+    version_added: "2.2"
+  dest_object:
+    description:
+      - The destination object when copying an object/key with a COPY operation.
+    required: false
+    aliases: []
+    version_added: "2.2"
   encrypt:
     description:
       - When set for PUT mode, asks for server-side encryption
@@ -84,9 +96,9 @@ options:
     version_added: "1.6"
   mode:
     description:
-      - Switches the module behaviour between put (upload), get (download), geturl (return download url, Ansible 1.3+), getstr (download object as string (1.3+)), list (list keys, Ansible 2.0+), create (bucket), delete (bucket), and delobj (delete object, Ansible 2.0+).
+      - Switches the module behaviour between put (upload), get (download), geturl (return download url, Ansible 1.3+), getstr (download object as string (1.3+)), list (list keys, Ansible 2.0+), create (bucket), delete (bucket), delobj (delete object, Ansible 2.0+), and copy (copy object from bucket to bucket, Ansible 2.2+).
     required: true
-    choices: ['get', 'put', 'delete', 'create', 'geturl', 'getstr', 'delobj', 'list']
+    choices: ['get', 'put', 'delete', 'create', 'geturl', 'getstr', 'delobj', 'list', 'copy']
   object:
     description:
       - Keyname of the object inside the bucket. Can be used to create "virtual directories", see examples.
@@ -98,6 +110,12 @@ options:
     required: false
     default: private
     version_added: "2.0"
+  preserve_acl:
+    description:
+      - This option lets the user copy the permissions from the source object to the destination object in a COPY operation. Default permissions will be applied to the destination object if set to False.
+    required: false
+    default: False
+    version_added: "2.2"
   prefix:
     description:
       - Limits the response to keys that begin with the specified prefix for list mode
@@ -163,6 +181,12 @@ EXAMPLES = '''
 
 # PUT/upload with custom headers
 - s3: bucket=mybucket object=/my/desired/key.txt src=/usr/local/myfile.txt mode=put headers=x-amz-grant-full-control=emailAddress=owner@example.com
+
+# Copy an object from bucket to bucket
+- s3: bucket=mybucket object=/my/desired/key.txt dest_bucket=mydestinationbucket dest_object=mydestinationobject.txt mode=copy
+
+# Copy a version of an object over itself
+- s3: bucket=mybucket object=/my/desired/key.txt version=48c9ee5131af7a716edc22df9772aa6f mode=copy
 
 # List keys simple
 - s3: bucket=mybucket mode=list
@@ -294,6 +318,22 @@ def path_check(path):
     else:
         return False
 
+def copy_s3file(module, s3, bucket, obj, dest_bucket, dest_obj, expiry, metadata, encrypt, headers, preserve_acl, version=None):
+    try:
+        destbucket = s3.lookup(dest_bucket)
+
+        #boto's copy_key function does not like leading / for objects so we should remove them
+        obj = obj.lstrip("/")
+        dest_obj = dest_obj.lstrip("/")
+
+        destkey = destbucket.copy_key(dest_obj, bucket, obj, metadata=metadata, src_version_id=version, preserve_acl=preserve_acl, encrypt_key=encrypt, headers=headers)
+
+        url = destkey.generate_url(expiry)
+        module.exit_json(msg="COPY operation complete", url=url, changed=True)
+    except s3.provider.storage_copy_error as e:
+        module.fail_json(msg= str(e))
+    except s3.provider.storage_response_error as e:
+        module.fail_json(msg= str(e))
 
 def upload_s3file(module, s3, bucket, obj, src, expiry, metadata, encrypt, headers):
     try:
@@ -370,15 +410,18 @@ def main():
     argument_spec.update(dict(
             bucket         = dict(required=True),
             dest           = dict(default=None),
+            dest_bucket    = dict(default=None),
+            dest_object    = dict(default=None),
             encrypt        = dict(default=True, type='bool'),
             expiry         = dict(default=600, aliases=['expiration']),
             headers        = dict(type='dict'),
             marker         = dict(default=None),
             max_keys       = dict(default=1000),
             metadata       = dict(type='dict'),
-            mode           = dict(choices=['get', 'put', 'delete', 'create', 'geturl', 'getstr', 'delobj', 'list'], required=True),
+            mode           = dict(choices=['get', 'put', 'delete', 'create', 'geturl', 'getstr', 'delobj', 'list', 'copy'], required=True),
             object         = dict(),
             permission     = dict(type='list', default=['private']),
+            preserve_acl   = dict(default=False, type='bool'),
             version        = dict(default=None),
             overwrite      = dict(aliases=['force'], default='always'),
             prefix         = dict(default=None),
@@ -397,12 +440,19 @@ def main():
     expiry = int(module.params['expiry'])
     if module.params.get('dest'):
         dest = os.path.expanduser(module.params.get('dest'))
+    preserve_acl = module.params.get('preserve_acl')
     headers = module.params.get('headers')
     marker = module.params.get('marker')
     max_keys = module.params.get('max_keys')
     metadata = module.params.get('metadata')
     mode = module.params.get('mode')
     obj = module.params.get('object')
+    dest_bucket = module.params['dest_bucket']
+    if not dest_bucket and mode == 'copy':
+        dest_bucket = bucket
+    dest_obj = module.params['dest_object']
+    if obj and dest_bucket and not dest_obj:
+        dest_obj = obj
     version = module.params.get('version')
     overwrite = module.params.get('overwrite')
     prefix = module.params.get('prefix')
@@ -559,6 +609,52 @@ def main():
         # If bucket exists but key doesn't, just upload.
         if bucketrtn is True and pathrtn is True and keyrtn is False:
             upload_s3file(module, s3, bucket, obj, src, expiry, metadata, encrypt, headers)
+
+    if mode == 'copy':
+        ### TODO - Add checks for dest_bucket requirement if copy is selected - this should probably be moved up higher to prevent any needless possible API calls.
+        # First, we check to see if the bucket exists, we get "bucket" returned.
+        bucketrtn = bucket_check(module, s3, bucket)
+        if bucketrtn is False:
+            module.fail_json(msg="Source bucket cannot be found", failed=True)
+
+        # Next, we check to see if the key in the bucket exists. If it exists, it also returns key_matches md5sum check.
+        keyrtn = key_check(module, s3, bucket, obj, version=version)
+        if keyrtn is False:
+            if version is not None:
+                module.fail_json(msg="Key %s with version id %s does not exist."% (obj, version), failed=True)
+            else:
+                module.fail_json(msg="Key %s does not exist."%obj, failed=True)
+
+        ### TODO - Add code to copy all bucket contents.
+        # next, we check to see if the destination bucket exists, we get "bucket" returned.
+        destbucketrtn = bucket_check(module, s3, dest_bucket)
+        if destbucketrtn is True:
+           destkeyrtn = key_check(module, s3, dest_bucket, dest_obj)
+
+        # Lets check key state. Does it exist and if it does, compute the etag md5sum.
+        if destbucketrtn is True and destkeyrtn is True:
+            md5_remote = keysum(module, s3, bucket, obj)
+            md5_dest = keysum(module, s3, dest_bucket, dest_obj)
+
+            if md5_dest == md5_remote:
+                if overwrite == 'always':
+                    copy_s3file(module, s3, bucket, obj, dest_bucket, dest_obj, expiry, metadata, encrypt, headers, preserve_acl, version=version)
+                else:
+                    get_download_url(module, s3, dest_bucket, dest_obj, expiry, changed=False)
+            else:
+                if overwrite in ('always', 'different'):
+                    copy_s3file(module, s3, bucket, obj, dest_bucket, dest_obj, expiry, metadata, encrypt, headers, preserve_acl, version=version)
+                else:
+                    module.exit_json(msg="WARNING: Checksums do not match. Use overwrite parameter to force upload.")
+
+        # If neither exist (based on bucket existence), we can create both.
+        if destbucketrtn is False and keyrtn is True:
+            create_bucket(module, s3, bucket, location)
+            copy_s3file(module, s3, bucket, obj, dest_bucket, dest_obj, expiry, metadata, encrypt, headers, preserve_acl, version=version)
+
+        # If bucket exists but key doesn't, just upload.
+        if destbucketrtn is True and keyrtn is True and destkeyrtn is False:
+            copy_s3file(module, s3, bucket, obj, dest_bucket, dest_obj, expiry, metadata, encrypt, headers, preserve_acl, version=version)
 
     # Delete an object from a bucket, not the entire bucket
     if mode == 'delobj':
